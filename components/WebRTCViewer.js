@@ -24,6 +24,7 @@ export default function WebRTCViewer({
   const [error, setError] = useState(null);
   const [cameraFacing, setCameraFacing] = useState('front');
   const [retryCount, setRetryCount] = useState(0);
+  const [debugInfo, setDebugInfo] = useState('Initializing...');
   
   const peerConnectionRef = useRef(null);
   const videoRef = useRef(null);
@@ -31,6 +32,7 @@ export default function WebRTCViewer({
   const streamRef = useRef(null);
   const timeoutRef = useRef(null);
   const isCleaningUpRef = useRef(false);
+  const iceCandidateQueueRef = useRef([]);
 
   const cleanup = useCallback(() => {
     isCleaningUpRef.current = true;
@@ -60,7 +62,20 @@ export default function WebRTCViewer({
       audioRef.current.srcObject = null;
     }
     
+    iceCandidateQueueRef.current = [];
     isCleaningUpRef.current = false;
+  }, []);
+
+  const processQueuedCandidates = useCallback(async (pc) => {
+    while (iceCandidateQueueRef.current.length > 0) {
+      const candidate = iceCandidateQueueRef.current.shift();
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        console.log('Added queued ICE candidate');
+      } catch (err) {
+        console.warn('Failed to add queued candidate:', err);
+      }
+    }
   }, []);
 
   const createPeerConnection = useCallback(() => {
@@ -71,7 +86,7 @@ export default function WebRTCViewer({
 
     pc.onicecandidate = (event) => {
       if (event.candidate && !isCleaningUpRef.current) {
-        console.log('Sending ICE candidate');
+        console.log('Sending ICE candidate to device');
         emit('signal', {
           targetDeviceId: deviceId,
           type: 'ice-candidate',
@@ -81,7 +96,8 @@ export default function WebRTCViewer({
     };
 
     pc.ontrack = (event) => {
-      console.log('Track received:', event.track.kind, event.streams);
+      console.log('🎥 Track received:', event.track.kind, event.streams);
+      setDebugInfo(`Track received: ${event.track.kind}`);
       
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
@@ -94,10 +110,12 @@ export default function WebRTCViewer({
         if (audioOnly) {
           if (audioRef.current) {
             audioRef.current.srcObject = event.streams[0];
+            console.log('Audio stream attached');
           }
         } else {
           if (videoRef.current) {
             videoRef.current.srcObject = event.streams[0];
+            console.log('Video stream attached');
           }
         }
         
@@ -109,6 +127,7 @@ export default function WebRTCViewer({
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
       console.log('Connection state:', state);
+      setDebugInfo(`Connection: ${state}`);
       
       if (isCleaningUpRef.current) return;
       
@@ -130,6 +149,7 @@ export default function WebRTCViewer({
 
     pc.oniceconnectionstatechange = () => {
       console.log('ICE connection state:', pc.iceConnectionState);
+      setDebugInfo(`ICE: ${pc.iceConnectionState}`);
       
       if (pc.iceConnectionState === 'failed') {
         console.log('ICE connection failed, attempting restart');
@@ -141,62 +161,120 @@ export default function WebRTCViewer({
       console.log('ICE gathering state:', pc.iceGatheringState);
     };
 
+    pc.onsignalingstatechange = () => {
+      console.log('Signaling state:', pc.signalingState);
+      setDebugInfo(`Signaling: ${pc.signalingState}`);
+    };
+
     return pc;
   }, [deviceId, emit, audioOnly, onConnectionStateChange]);
 
   const handleSignal = useCallback(async (data) => {
+    console.log('📨 Signal received:', JSON.stringify(data).substring(0, 200));
+    
     // Handle different signal formats from backend
-    const fromDevice = data.fromDeviceId || data.deviceId || data.from;
-    if (fromDevice !== deviceId) return;
+    const fromDevice = data.fromDeviceId || data.deviceId || data.from || data.sourceDeviceId;
+    
+    // If no device ID in signal, assume it's for us (some backends don't include it)
+    if (fromDevice && fromDevice !== deviceId) {
+      console.log('Signal not for this device, ignoring');
+      return;
+    }
     
     const pc = peerConnectionRef.current;
-    if (!pc || isCleaningUpRef.current) return;
+    if (!pc) {
+      console.log('No peer connection, ignoring signal');
+      return;
+    }
+    
+    if (isCleaningUpRef.current) return;
 
     try {
-      const signalType = data.type || data.signalType;
+      const signalType = data.type || data.signalType || data.action;
       
-      if (signalType === 'answer' || data.answer) {
-        console.log('Received answer from device');
-        const answer = data.answer || data.sdp || data;
+      // Handle answer
+      if (signalType === 'answer' || data.answer || data.sdp?.type === 'answer') {
+        console.log('📥 Received answer from device');
+        setDebugInfo('Answer received, setting remote description...');
         
-        if (pc.signalingState === 'have-local-offer') {
-          await pc.setRemoteDescription(new RTCSessionDescription(
-            typeof answer === 'string' ? { type: 'answer', sdp: answer } : answer
-          ));
-          console.log('Remote description set successfully');
+        let answerSdp;
+        if (data.answer) {
+          answerSdp = typeof data.answer === 'string' 
+            ? { type: 'answer', sdp: data.answer }
+            : data.answer;
+        } else if (data.sdp) {
+          answerSdp = typeof data.sdp === 'string'
+            ? { type: 'answer', sdp: data.sdp }
+            : data.sdp;
+        } else if (typeof data === 'object' && data.type === 'answer') {
+          answerSdp = data;
         }
-      } else if ((signalType === 'ice-candidate' || data.candidate) && data.candidate) {
-        console.log('Received ICE candidate from device');
-        const candidate = data.candidate;
         
-        if (pc.remoteDescription) {
-          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        if (answerSdp && pc.signalingState === 'have-local-offer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(answerSdp));
+          console.log('✅ Remote description set successfully');
+          setDebugInfo('Remote description set, processing ICE candidates...');
+          
+          // Process queued ICE candidates
+          await processQueuedCandidates(pc);
         } else {
-          // Queue the candidate if remote description isn't set yet
-          console.log('Queueing ICE candidate - remote description not set yet');
+          console.log('Cannot set answer, signaling state:', pc.signalingState);
         }
+      } 
+      // Handle ICE candidate
+      else if (signalType === 'ice-candidate' || signalType === 'candidate' || data.candidate) {
+        console.log('📥 Received ICE candidate from device');
+        const candidate = data.candidate || data.iceCandidate;
+        
+        if (candidate) {
+          if (pc.remoteDescription) {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            console.log('✅ ICE candidate added');
+          } else {
+            // Queue the candidate if remote description isn't set yet
+            console.log('Queueing ICE candidate - remote description not set yet');
+            iceCandidateQueueRef.current.push(candidate);
+          }
+        }
+      }
+      // Handle offer (if device sends offer instead of answer - reverse flow)
+      else if (signalType === 'offer' || data.offer) {
+        console.log('📥 Received offer from device (reverse flow)');
+        setDebugInfo('Received offer, creating answer...');
+        
+        const offerSdp = data.offer || data.sdp || data;
+        await pc.setRemoteDescription(new RTCSessionDescription(
+          typeof offerSdp === 'string' ? { type: 'offer', sdp: offerSdp } : offerSdp
+        ));
+        
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        
+        emit('signal', {
+          targetDeviceId: deviceId,
+          type: 'answer',
+          answer: answer,
+        });
+        console.log('✅ Answer sent');
       }
     } catch (err) {
-      console.error('Signal handling error:', err);
-      // Don't set error for non-critical signal issues
-      if (err.name !== 'InvalidStateError') {
-        console.warn('Signal error (non-critical):', err.message);
-      }
+      console.error('❌ Signal handling error:', err);
+      setDebugInfo(`Error: ${err.message}`);
     }
-  }, [deviceId]);
+  }, [deviceId, emit, processQueuedCandidates]);
 
   const startCall = useCallback(async (facing = 'front') => {
     cleanup();
     setError(null);
     setConnectionState('connecting');
+    setDebugInfo('Initializing peer connection...');
+    iceCandidateQueueRef.current = [];
 
     // Set timeout for connection
     timeoutRef.current = setTimeout(() => {
-      if (connectionState === 'connecting') {
-        setError('Connection timed out. The device may be busy or not responding. Please try again.');
-        setConnectionState('failed');
-        cleanup();
-      }
+      setError('Connection timed out. The device camera activated but no video stream was received. The Android app may not be sending the WebRTC answer correctly.');
+      setConnectionState('failed');
+      cleanup();
     }, CONNECTION_TIMEOUT);
 
     try {
@@ -209,13 +287,15 @@ export default function WebRTCViewer({
       }
       pc.addTransceiver('audio', { direction: 'recvonly' });
 
+      setDebugInfo('Creating offer...');
       const offer = await pc.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: !audioOnly,
       });
       
       await pc.setLocalDescription(offer);
-      console.log('Local description set, sending call request');
+      console.log('📤 Local description set, sending call request');
+      setDebugInfo('Offer sent, waiting for answer...');
 
       emit('call-request', {
         targetDeviceId: deviceId,
@@ -237,7 +317,7 @@ export default function WebRTCViewer({
         timeoutRef.current = null;
       }
     }
-  }, [cleanup, createPeerConnection, deviceId, emit, streamType, audioOnly, connectionState]);
+  }, [cleanup, createPeerConnection, deviceId, emit, streamType, audioOnly]);
 
   const endCall = useCallback(() => {
     emit('call-end', { targetDeviceId: deviceId });
@@ -260,11 +340,22 @@ export default function WebRTCViewer({
   useEffect(() => {
     if (!socket) return;
 
+    // Listen for multiple possible signal event names
     on('signal', handleSignal);
+    on('webrtc-signal', handleSignal);
+    on('rtc-signal', handleSignal);
+    on('answer', handleSignal);
+    on('ice-candidate', handleSignal);
+    
+    setDebugInfo('Sending call request...');
     startCall(cameraFacing);
 
     return () => {
       off('signal', handleSignal);
+      off('webrtc-signal', handleSignal);
+      off('rtc-signal', handleSignal);
+      off('answer', handleSignal);
+      off('ice-candidate', handleSignal);
       endCall();
     };
   }, [socket]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -311,7 +402,8 @@ export default function WebRTCViewer({
               <div className="flex flex-col items-center">
                 <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4" />
                 <p className="text-dark-300">Connecting to device...</p>
-                <p className="text-dark-500 text-sm mt-2">Waiting for device to accept...</p>
+                <p className="text-dark-500 text-sm mt-2">Waiting for device to respond...</p>
+                <p className="text-dark-600 text-xs mt-4 font-mono">{debugInfo}</p>
               </div>
             </div>
           )}
