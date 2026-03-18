@@ -34,6 +34,9 @@ export default function WebRTCViewer({
   const isCleaningUpRef = useRef(false);
   const iceCandidateQueueRef = useRef([]);
 
+  // Get socket ID for requesterId
+  const socketId = socket?.id;
+
   const cleanup = useCallback(() => {
     isCleaningUpRef.current = true;
     
@@ -89,6 +92,7 @@ export default function WebRTCViewer({
         console.log('Sending ICE candidate to device');
         emit('signal', {
           targetDeviceId: deviceId,
+          fromDeviceId: socketId || 'parent',
           type: 'ice-candidate',
           candidate: event.candidate,
         });
@@ -170,14 +174,16 @@ export default function WebRTCViewer({
   }, [deviceId, emit, audioOnly, onConnectionStateChange]);
 
   const handleSignal = useCallback(async (data) => {
-    console.log('📨 Signal received:', JSON.stringify(data).substring(0, 200));
+    console.log('📨 Signal received:', JSON.stringify(data).substring(0, 300));
     
     // Handle different signal formats from backend
+    // Android sends: { fromDeviceId, targetDeviceId, type, answer/candidate }
     const fromDevice = data.fromDeviceId || data.deviceId || data.from || data.sourceDeviceId;
     
-    // If no device ID in signal, assume it's for us (some backends don't include it)
+    // Signal from Android should have fromDeviceId matching the device we're calling
+    // But also accept signals without fromDevice (backend might strip it)
     if (fromDevice && fromDevice !== deviceId) {
-      console.log('Signal not for this device, ignoring');
+      console.log('Signal from different device:', fromDevice, 'expected:', deviceId);
       return;
     }
     
@@ -192,28 +198,38 @@ export default function WebRTCViewer({
     try {
       const signalType = data.type || data.signalType || data.action;
       
-      // Handle answer
-      if (signalType === 'answer' || data.answer || data.sdp?.type === 'answer') {
+      // Handle answer - Android sends: { type: 'answer', answer: { type, sdp } }
+      if (signalType === 'answer' || data.answer) {
         console.log('📥 Received answer from device');
         setDebugInfo('Answer received, setting remote description...');
         
         let answerSdp;
+        
+        // Android sends answer as RTCSessionDescription: { type: 'answer', sdp: '...' }
         if (data.answer) {
-          answerSdp = typeof data.answer === 'string' 
-            ? { type: 'answer', sdp: data.answer }
-            : data.answer;
+          if (typeof data.answer === 'object' && data.answer.sdp) {
+            // Answer is already { type, sdp }
+            answerSdp = {
+              type: data.answer.type || 'answer',
+              sdp: data.answer.sdp,
+            };
+          } else if (typeof data.answer === 'string') {
+            // Answer is just SDP string
+            answerSdp = { type: 'answer', sdp: data.answer };
+          }
         } else if (data.sdp) {
+          // SDP sent directly
           answerSdp = typeof data.sdp === 'string'
             ? { type: 'answer', sdp: data.sdp }
-            : data.sdp;
-        } else if (typeof data === 'object' && data.type === 'answer') {
-          answerSdp = data;
+            : { type: data.sdp.type || 'answer', sdp: data.sdp.sdp || data.sdp };
         }
         
-        if (answerSdp && pc.signalingState === 'have-local-offer') {
+        console.log('Answer SDP type:', answerSdp?.type, 'has sdp:', !!answerSdp?.sdp);
+        
+        if (answerSdp?.sdp && pc.signalingState === 'have-local-offer') {
           await pc.setRemoteDescription(new RTCSessionDescription(answerSdp));
           console.log('✅ Remote description set successfully');
-          setDebugInfo('Remote description set, processing ICE candidates...');
+          setDebugInfo('Connected! Processing ICE candidates...');
           
           // Process queued ICE candidates
           await processQueuedCandidates(pc);
@@ -252,6 +268,7 @@ export default function WebRTCViewer({
         
         emit('signal', {
           targetDeviceId: deviceId,
+          fromDeviceId: socketId || 'parent',
           type: 'answer',
           answer: answer,
         });
@@ -261,7 +278,7 @@ export default function WebRTCViewer({
       console.error('❌ Signal handling error:', err);
       setDebugInfo(`Error: ${err.message}`);
     }
-  }, [deviceId, emit, processQueuedCandidates]);
+  }, [deviceId, emit, processQueuedCandidates, socketId]);
 
   const startCall = useCallback(async (facing = 'front') => {
     cleanup();
@@ -299,6 +316,7 @@ export default function WebRTCViewer({
 
       emit('call-request', {
         targetDeviceId: deviceId,
+        requesterId: socketId || 'parent',  // Android app needs this to send answer back
         type: streamType,
         cameraFacing: facing,
         offer: {
