@@ -57,6 +57,46 @@ function formatLastSeen(timestamp) {
   return `${diffDays}d ago`;
 }
 
+function normalizeBattery(battery) {
+  if (!battery) return { percent: null, isCharging: false };
+  
+  // Get raw value from various possible fields
+  let rawValue = battery.percentage ?? battery.level ?? battery.percent ?? battery.value ?? null;
+  let isCharging = battery.isCharging ?? battery.charging ?? battery.plugged ?? false;
+  
+  if (rawValue === null || rawValue === undefined) {
+    return { percent: null, isCharging };
+  }
+  
+  // Convert to number
+  rawValue = Number(rawValue);
+  
+  // If value is between 0 and 1, it's a decimal - multiply by 100
+  if (rawValue > 0 && rawValue <= 1) {
+    rawValue = Math.round(rawValue * 100);
+  } else {
+    rawValue = Math.round(rawValue);
+  }
+  
+  // Clamp between 0 and 100
+  rawValue = Math.max(0, Math.min(100, rawValue));
+  
+  return { percent: rawValue, isCharging };
+}
+
+function normalizeLocation(location) {
+  if (!location) return null;
+  
+  const lat = location.latitude ?? location.lat ?? location.coords?.latitude ?? null;
+  const lng = location.longitude ?? location.lng ?? location.lon ?? location.coords?.longitude ?? null;
+  
+  if (lat === null || lng === null || lat === 0 || lng === 0) {
+    return null;
+  }
+  
+  return { lat: Number(lat), lng: Number(lng) };
+}
+
 export default function DeviceCard({ device, index }) {
   const {
     deviceId,
@@ -72,8 +112,8 @@ export default function DeviceCard({ device, index }) {
   const accentGradient = accentColors[colorIndex];
   const borderColor = accentBorders[colorIndex];
 
-  const batteryPercent = battery?.percentage ?? battery?.level ?? 0;
-  const isCharging = battery?.isCharging ?? battery?.charging ?? false;
+  const { percent: batteryPercent, isCharging } = normalizeBattery(battery);
+  const normalizedLocation = normalizeLocation(location);
 
   return (
     <div 
@@ -101,11 +141,18 @@ export default function DeviceCard({ device, index }) {
         </div>
 
         <div className="flex items-center justify-between">
-          <div className={`flex items-center gap-2 ${getBatteryColor(batteryPercent)}`}>
-            <span className="text-xl">{getBatteryIcon(batteryPercent, isCharging)}</span>
-            <span className="font-semibold text-lg">{batteryPercent}%</span>
-            {isCharging && <span className="text-xs text-yellow-400">⚡ Charging</span>}
-          </div>
+          {batteryPercent !== null ? (
+            <div className={`flex items-center gap-2 ${getBatteryColor(batteryPercent)}`}>
+              <span className="text-xl">{getBatteryIcon(batteryPercent, isCharging)}</span>
+              <span className="font-semibold text-lg">{batteryPercent}%</span>
+              {isCharging && <span className="text-xs text-yellow-400">⚡ Charging</span>}
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 text-dark-500">
+              <span className="text-xl">🔋</span>
+              <span className="text-sm">Battery N/A</span>
+            </div>
+          )}
           
           {!isOnline && lastSeen && (
             <div className="text-dark-400 text-sm">
@@ -114,9 +161,9 @@ export default function DeviceCard({ device, index }) {
           )}
         </div>
 
-        {location && (location.latitude || location.lat) && (
+        {normalizedLocation ? (
           <a
-            href={`https://maps.google.com/?q=${location.latitude || location.lat},${location.longitude || location.lng}`}
+            href={`https://maps.google.com/?q=${normalizedLocation.lat},${normalizedLocation.lng}`}
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-2 text-blue-400 hover:text-blue-300 transition-colors"
@@ -124,6 +171,11 @@ export default function DeviceCard({ device, index }) {
             <span>📍</span>
             <span className="text-sm underline">View Location on Maps</span>
           </a>
+        ) : (
+          <div className="flex items-center gap-2 text-dark-500">
+            <span>📍</span>
+            <span className="text-sm">Location unavailable</span>
+          </div>
         )}
 
         <div className="grid grid-cols-5 gap-2 pt-2">

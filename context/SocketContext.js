@@ -40,7 +40,13 @@ export function SocketProvider({ children }) {
       setDevices(deviceList || []);
     });
 
-    socketInstance.on('location-update', ({ deviceId, location }) => {
+    socketInstance.on('location-update', (data) => {
+      // Handle different data formats
+      const deviceId = data.deviceId || data.from || data.fromDeviceId;
+      const location = data.location || data.coords || data;
+      
+      if (!deviceId) return;
+      
       setDevices(prev => prev.map(device => 
         device.deviceId === deviceId 
           ? { ...device, location }
@@ -48,7 +54,13 @@ export function SocketProvider({ children }) {
       ));
     });
 
-    socketInstance.on('battery-update', ({ deviceId, battery }) => {
+    socketInstance.on('battery-update', (data) => {
+      // Handle different data formats
+      const deviceId = data.deviceId || data.from || data.fromDeviceId;
+      const battery = data.battery || data;
+      
+      if (!deviceId) return;
+      
       setDevices(prev => prev.map(device => 
         device.deviceId === deviceId 
           ? { ...device, battery }
@@ -56,7 +68,9 @@ export function SocketProvider({ children }) {
       ));
     });
 
-    socketInstance.on('device-connected', (device) => {
+    socketInstance.on('device-connected', (data) => {
+      const device = data.device || data;
+      
       setDevices(prev => {
         const exists = prev.find(d => d.deviceId === device.deviceId);
         if (exists) {
@@ -66,7 +80,9 @@ export function SocketProvider({ children }) {
       });
     });
 
-    socketInstance.on('device-disconnected', ({ deviceId }) => {
+    socketInstance.on('device-disconnected', (data) => {
+      const deviceId = data.deviceId || data;
+      
       setDevices(prev => prev.map(device => 
         device.deviceId === deviceId 
           ? { ...device, isOnline: false, lastSeen: new Date().toISOString() }

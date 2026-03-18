@@ -2,11 +2,13 @@
 
 import { useParams } from 'next/navigation';
 import { useSocket } from '@/context/SocketContext';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 
+const FILE_REQUEST_TIMEOUT = 15000; // 15 seconds
+
 function formatFileSize(bytes) {
-  if (bytes === 0) return '0 B';
+  if (bytes === 0 || bytes === null || bytes === undefined) return '0 B';
   const k = 1024;
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -14,7 +16,7 @@ function formatFileSize(bytes) {
 }
 
 function getFileIcon(item) {
-  if (item.isDirectory) return '📁';
+  if (item.isDirectory || item.type === 'directory' || item.dir) return '📁';
   
   const ext = item.name?.split('.').pop()?.toLowerCase();
   const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
@@ -33,51 +35,106 @@ function getFileIcon(item) {
   return '📄';
 }
 
+function normalizeFileItem(item) {
+  return {
+    name: item.name || item.filename || item.fileName || 'Unknown',
+    isDirectory: item.isDirectory ?? item.dir ?? item.type === 'directory' ?? false,
+    size: item.size ?? item.fileSize ?? null,
+    type: item.mimeType ?? item.type ?? null,
+    lastModified: item.lastModified ?? item.modifiedTime ?? item.modified ?? null,
+  };
+}
+
 export default function FilesPage() {
   const params = useParams();
-  const { getDevice, emit, on, off } = useSocket();
+  const { getDevice, emit, on, off, socket } = useSocket();
   
   const deviceId = params.deviceId;
   const device = getDevice(deviceId);
   
-  const [currentPath, setCurrentPath] = useState('/');
+  const [currentPath, setCurrentPath] = useState('/storage/emulated/0');
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
+  const timeoutRef = useRef(null);
 
   const requestFiles = useCallback((path) => {
+    if (!socket) return;
+    
     setLoading(true);
     setError(null);
+    
+    // Clear any existing timeout
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
+    
+    // Set timeout for the request
+    timeoutRef.current = setTimeout(() => {
+      setLoading(false);
+      setError('Request timed out. The device may not support file browsing or is not responding.');
+    }, FILE_REQUEST_TIMEOUT);
+    
+    console.log('Requesting files for path:', path);
     emit('file-list-request', {
       targetDeviceId: deviceId,
+      deviceId: deviceId,
       path: path,
     });
-  }, [deviceId, emit]);
+  }, [deviceId, emit, socket]);
 
   useEffect(() => {
+    if (!socket) return;
+    
     const handleFileList = (data) => {
-      if (data.deviceId !== deviceId) return;
+      console.log('File list response:', data);
+      
+      // Check if this response is for our device
+      const responseDeviceId = data.deviceId || data.fromDeviceId || data.from;
+      if (responseDeviceId && responseDeviceId !== deviceId) return;
+      
+      // Clear timeout
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
       
       setLoading(false);
+      
       if (data.error) {
         setError(data.error);
         setFiles([]);
       } else {
-        setFiles(data.files || []);
-        if (data.path) {
-          setCurrentPath(data.path);
+        // Handle different response formats
+        const fileList = data.files || data.items || data.list || data.data || [];
+        const normalizedFiles = fileList.map(normalizeFileItem);
+        setFiles(normalizedFiles);
+        
+        if (data.path || data.currentPath) {
+          setCurrentPath(data.path || data.currentPath);
         }
       }
     };
 
     on('file-list-response', handleFileList);
-    requestFiles('/');
+    // Also listen for alternate event names
+    on('files-response', handleFileList);
+    on('file-list', handleFileList);
+    
+    // Initial request
+    requestFiles(currentPath);
 
     return () => {
       off('file-list-response', handleFileList);
+      off('files-response', handleFileList);
+      off('file-list', handleFileList);
+      
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
     };
-  }, [deviceId, on, off, requestFiles]);
+  }, [socket, deviceId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const navigateTo = (path) => {
     setSelectedFile(null);
@@ -85,15 +142,17 @@ export default function FilesPage() {
   };
 
   const goUp = () => {
-    if (currentPath === '/') return;
-    const parentPath = currentPath.split('/').slice(0, -1).join('/') || '/';
+    if (currentPath === '/' || currentPath === '/storage/emulated/0') return;
+    const parts = currentPath.split('/').filter(Boolean);
+    parts.pop();
+    const parentPath = '/' + parts.join('/') || '/storage/emulated/0';
     navigateTo(parentPath);
   };
 
   const handleItemClick = (item) => {
     if (item.isDirectory) {
-      const newPath = currentPath === '/' 
-        ? `/${item.name}` 
+      const newPath = currentPath.endsWith('/') 
+        ? `${currentPath}${item.name}` 
         : `${currentPath}/${item.name}`;
       navigateTo(newPath);
     } else {
@@ -101,10 +160,12 @@ export default function FilesPage() {
     }
   };
 
+  const isRootPath = currentPath === '/' || currentPath === '/storage/emulated/0';
+
   const sortedFiles = [...files].sort((a, b) => {
     if (a.isDirectory && !b.isDirectory) return -1;
     if (!a.isDirectory && b.isDirectory) return 1;
-    return a.name.localeCompare(b.name);
+    return (a.name || '').localeCompare(b.name || '');
   });
 
   return (
@@ -141,9 +202,9 @@ export default function FilesPage() {
           <div className="bg-dark-800 border-b border-dark-700 px-4 py-2 flex items-center gap-2">
             <button
               onClick={goUp}
-              disabled={currentPath === '/'}
+              disabled={isRootPath}
               className={`p-2 rounded-lg transition-colors ${
-                currentPath === '/' 
+                isRootPath 
                   ? 'text-dark-500 cursor-not-allowed' 
                   : 'text-white hover:bg-dark-700'
               }`}
