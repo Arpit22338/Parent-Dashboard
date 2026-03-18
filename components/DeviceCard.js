@@ -178,7 +178,7 @@ export default function DeviceCard({ device, index }) {
           </div>
         )}
 
-        <div className="grid grid-cols-5 gap-2 pt-2">
+        <div className="grid grid-cols-6 gap-2 pt-2">
           <Link
             href={`/camera/${deviceId}`}
             className={`flex flex-col items-center justify-center p-3 rounded-xl transition-all duration-200
@@ -237,6 +237,14 @@ export default function DeviceCard({ device, index }) {
           >
             <span className="text-2xl">📸</span>
             <span className="text-xs text-dark-300 mt-1">Snap</span>
+          </Link>
+
+          <Link
+            href={`/notifications/${deviceId}`}
+            className="flex flex-col items-center justify-center p-3 rounded-xl transition-all duration-200 bg-dark-700 hover:bg-dark-600 cursor-pointer"
+          >
+            <span className="text-2xl">🔔</span>
+            <span className="text-xs text-dark-300 mt-1">Notifs</span>
           </Link>
         </div>
       </div>
